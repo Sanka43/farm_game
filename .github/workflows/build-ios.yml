@@ -1,0 +1,73 @@
+name: Build iOS (unsigned IPA)
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  # 1) Unity (Linux) generates the Xcode project.
+  unity:
+    name: Unity -> Xcode project
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/cache@v4
+        with:
+          path: Library
+          key: Library-iOS-${{ hashFiles('Assets/**', 'Packages/**', 'ProjectSettings/**') }}
+          restore-keys: Library-iOS-
+
+      - uses: game-ci/unity-builder@v4
+        env:
+          UNITY_LICENSE: ${{ secrets.UNITY_LICENSE }}
+          UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
+          UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
+        with:
+          unityVersion: auto
+          targetPlatform: iOS
+          buildMethod: BuildScript.BuildIOS
+          allowDirtyBuild: true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: xcode-project
+          path: build/iOS
+          retention-days: 3
+
+  # 2) macOS compiles the Xcode project and packages an unsigned .ipa.
+  ipa:
+    name: Xcode -> IPA
+    needs: unity
+    runs-on: macos-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: xcode-project
+          path: xcode
+
+      - name: Build unsigned app
+        run: |
+          PROJ=$(find xcode -name "Unity-iPhone.xcodeproj" -maxdepth 4 | head -n 1)
+          echo "Project: $PROJ"
+          DIR=$(dirname "$PROJ")
+          # Linux-generated projects lose executable bits on helper scripts.
+          find "$DIR" -name "*.sh" -exec chmod +x {} \;
+          xcodebuild -project "$PROJ" -scheme Unity-iPhone -configuration Release \
+            -sdk iphoneos -destination 'generic/platform=iOS' \
+            -derivedDataPath build/dd \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            build
+
+      - name: Package IPA
+        run: |
+          mkdir -p Payload
+          cp -R build/dd/Build/Products/Release-iphoneos/*.app Payload/
+          zip -qr Meadowbrook.ipa Payload
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Meadowbrook-ipa
+          path: Meadowbrook.ipa
+          retention-days: 14
